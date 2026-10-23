@@ -35,7 +35,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           test -n "$SDK"
 
@@ -60,7 +59,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$HOME/.android"
 
           keytool -genkeypair -noprompt \
@@ -79,7 +77,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
           mkdir -p "$HOME/.config/godot"
@@ -101,72 +98,94 @@ jobs:
           set -euo pipefail
 
           FILE="neon-dash-runner/export_presets.cfg"
+          KEYSTORE="$HOME/.android/debug.keystore"
 
           test -f neon-dash-runner/project.godot
           test -f "$FILE"
+          test -s "$KEYSTORE"
 
-          python3 - <<'PY'
+          python3 - "$FILE" "$KEYSTORE" <<'PY'
+          import sys
           from pathlib import Path
 
-          path = Path("neon-dash-runner/export_presets.cfg")
+          path = Path(sys.argv[1])
+          keystore = sys.argv[2]
           lines = path.read_text().splitlines()
 
+          # Find the Android Debug preset by its name.
+          preset_index = None
+          section = None
+
+          for i, line in enumerate(lines):
+              s = line.strip()
+
+              if s.startswith("[") and s.endswith("]"):
+                  section = s
+
+              if section == "[preset.0]" and s == 'name="Android Debug"':
+                  preset_index = 0
+                  break
+
+          if preset_index is None:
+              raise SystemExit(
+                  'Android Debug preset [preset.0] not found.'
+              )
+
+          options_section = "[preset.0.options]"
+          try:
+              start = next(
+                  i for i, line in enumerate(lines)
+                  if line.strip() == options_section
+              )
+          except StopIteration:
+              raise SystemExit(
+                  "Missing [preset.0.options] section."
+              )
+
+          end = len(lines)
+          for i in range(start + 1, len(lines)):
+              s = lines[i].strip()
+              if s.startswith("[") and s.endswith("]"):
+                  end = i
+                  break
+
           updates = {
-              "keystore/debug": str(
-                  Path.home() / ".android" / "debug.keystore"
-              ),
+              "keystore/debug": keystore,
               "keystore/debug_user": "androiddebugkey",
               "keystore/debug_password": "android",
           }
 
-          section = None
-          found_preset = False
           seen = set()
-          output = []
+          output = lines[:start + 1]
 
-          for line in lines:
+          for line in lines[start + 1:end]:
               stripped = line.strip()
+              key = stripped.split("=", 1)[0] if "=" in stripped else ""
 
-              if stripped.startswith("[preset.") and stripped.endswith("]"):
-                  section = stripped
-                  if section == "[preset.0]":
-                      found_preset = True
+              if key in updates:
+                  output.append(f'{key}="{updates[key]}"')
+                  seen.add(key)
+              else:
+                  output.append(line)
 
-              if section == "[preset.0]":
-                  matched = False
+          for key, value in updates.items():
+              if key not in seen:
+                  output.append(f'{key}="{value}"')
 
-                  for key, value in updates.items():
-                      if stripped.startswith(key + "="):
-                          output.append(f'{key}="{value}"')
-                          seen.add(key)
-                          matched = True
-                          break
-
-                  if matched:
-                      continue
-
-              output.append(line)
-
-          if not found_preset:
-              raise SystemExit("Android preset section not found")
-
-          missing = set(updates) - seen
-          if missing:
-              raise SystemExit(
-                  "Preset is missing expected keys: " + ", ".join(sorted(missing))
-              )
-
+          output.extend(lines[end:])
           path.write_text("\n".join(output) + "\n")
-          print("Debug keystore settings written to preset.")
+
+          print("Android preset keystore settings repaired.")
+          for key, value in updates.items():
+              print(f'{key}="{value}"')
           PY
 
-          grep -nE '^name=|^platform=|^keystore/debug' "$FILE"
+          grep -nE '^keystore/debug' "$FILE"
 
       - name: Import Godot project
         shell: bash
         run: |
           set -euo pipefail
-
           godot --headless --editor \
             --path neon-dash-runner --quit
 
@@ -174,7 +193,6 @@ jobs:
         shell: bash
         run: |
           set -uo pipefail
-
           mkdir -p "$GITHUB_WORKSPACE/build"
 
           set +e
@@ -193,11 +211,10 @@ jobs:
             exit 1
           fi
 
-      - name: Verify APK
+      - name: Verify APK signature
         shell: bash
         run: |
           set -euo pipefail
-
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
           "$SDK/build-tools/35.0.1/apksigner" verify --verbose \
