@@ -16,6 +16,7 @@ jobs:
   build-android:
     name: Export Android Debug APK
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
@@ -30,7 +31,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK components
+      - name: Install Android SDK, NDK and CMake
         shell: bash
         run: |
           set -euo pipefail
@@ -38,15 +39,19 @@ jobs:
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           test -n "$SDK"
 
-          yes | sdkmanager --sdk_root="$SDK" --licenses || true
-
           sdkmanager --sdk_root="$SDK" --install \
             "platform-tools" \
+            "cmdline-tools;latest" \
             "platforms;android-35" \
-            "build-tools;35.0.1"
+            "build-tools;35.0.1" \
+            "ndk;23.2.8568313" \
+            "cmake;3.10.2.4988404"
+
+          yes | sdkmanager --sdk_root="$SDK" --licenses || true
 
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$SDK/ndk/23.2.8568313" >> "$GITHUB_ENV"
 
       - name: Install Godot 4.4.1 and export templates
         uses: chickensoft-games/setup-godot@v2
@@ -89,6 +94,8 @@ jobs:
           test -x "$SDK/platform-tools/adb"
           test -d "$SDK/platforms/android-35"
           test -d "$SDK/build-tools/35.0.1"
+          test -d "$SDK/ndk/23.2.8568313"
+          test -d "$SDK/cmake/3.10.2.4988404"
 
           mkdir -p "$HOME/.config/godot"
 
@@ -103,8 +110,7 @@ jobs:
           export/android/debug_keystore_pass = "android"
           EOF
 
-          echo "Android SDK: $SDK"
-          echo "Java: $JAVA_HOME"
+          echo "SDK and Java paths configured."
           godot --version
 
       - name: Validate and repair Android preset
@@ -122,21 +128,21 @@ jobs:
 
           python3 - <<'PY'
           from pathlib import Path
-          import os
 
           path = Path("neon-dash-runner/export_presets.cfg")
           text = path.read_text()
+          lines = text.splitlines()
 
-          keystore = str(Path.home() / ".android/debug.keystore")
           updates = {
-              'keystore/debug': keystore,
-              'keystore/debug_user': 'androiddebugkey',
-              'keystore/debug_password': 'android',
+              "keystore/debug": str(
+                  Path.home() / ".android" / "debug.keystore"
+              ),
+              "keystore/debug_user": "androiddebugkey",
+              "keystore/debug_password": "android",
           }
 
           for key, value in updates.items():
               prefix = key + "="
-              lines = text.splitlines()
               found = False
 
               for i, line in enumerate(lines):
@@ -146,16 +152,16 @@ jobs:
                       break
 
               if not found:
-                  raise SystemExit(f"Missing preset option: {key}")
+                  raise SystemExit(
+                      f"Missing Android preset option: {key}"
+                  )
 
-              text = "\n".join(lines) + "\n"
-
-          path.write_text(text)
-          print("Android preset keystore settings updated.")
+          path.write_text("\n".join(lines) + "\n")
+          print("Preset keystore fields updated.")
           PY
 
-          grep -E '^name=|^platform=|^keystore/debug' "$FILE"
           test -s "$HOME/.android/debug.keystore"
+          grep -nE '^name=|^platform=|^keystore/debug' "$FILE"
 
       - name: Import Godot project
         shell: bash
@@ -172,9 +178,7 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/build"
 
-          echo "Starting Android export..."
           set +e
-
           godot --headless --verbose \
             --path neon-dash-runner \
             --export-debug "Android Debug" \
@@ -186,11 +190,11 @@ jobs:
 
           if [ "$RESULT" -ne 0 ] || \
              [ ! -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" ]; then
-            echo "Export failed. See export.log in the artifact."
+            echo "Android export failed."
             exit 1
           fi
 
-          echo "APK export successful."
+          echo "APK created successfully."
 
       - name: Generate checksum
         if: success()
@@ -200,7 +204,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/build"
           sha256sum NeonDashRunner-debug.apk > SHA256SUMS.txt
 
-      - name: Upload APK and diagnostics
+      - name: Upload APK and diagnostic logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
