@@ -31,7 +31,7 @@ jobs:
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
 
-      - name: Install Android SDK, NDK and CMake
+      - name: Install Godot 4.4 Android SDK requirements
         shell: bash
         run: |
           set -euo pipefail
@@ -40,8 +40,10 @@ jobs:
           test -n "$SDK"
 
           sdkmanager --sdk_root="$SDK" --install \
-            "platform-tools" \
             "cmdline-tools;latest" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
             "platforms;android-35" \
             "build-tools;35.0.1" \
             "ndk;23.2.8568313" \
@@ -53,7 +55,7 @@ jobs:
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_HOME=$SDK/ndk/23.2.8568313" >> "$GITHUB_ENV"
 
-      - name: Install Godot 4.4.1 and export templates
+      - name: Install Godot and export templates
         uses: chickensoft-games/setup-godot@v2
         with:
           version: 4.4.1
@@ -92,6 +94,8 @@ jobs:
 
           test -x "$JAVA_HOME/bin/java"
           test -x "$SDK/platform-tools/adb"
+          test -d "$SDK/platforms/android-34"
+          test -d "$SDK/build-tools/34.0.0"
           test -d "$SDK/platforms/android-35"
           test -d "$SDK/build-tools/35.0.1"
           test -d "$SDK/ndk/23.2.8568313"
@@ -110,7 +114,9 @@ jobs:
           export/android/debug_keystore_pass = "android"
           EOF
 
-          echo "SDK and Java paths configured."
+          echo "Godot Android SDK configuration:"
+          echo "SDK=$SDK"
+          echo "JAVA_HOME=$JAVA_HOME"
           godot --version
 
       - name: Validate and repair Android preset
@@ -145,23 +151,26 @@ jobs:
               prefix = key + "="
               found = False
 
-              for i, line in enumerate(lines):
+              for index, line in enumerate(lines):
                   if line.strip().startswith(prefix):
-                      lines[i] = f'{key}="{value}"'
+                      lines[index] = f'{key}="{value}"'
                       found = True
                       break
 
               if not found:
                   raise SystemExit(
-                      f"Missing Android preset option: {key}"
+                      f"Missing Android export option: {key}"
                   )
 
           path.write_text("\n".join(lines) + "\n")
-          print("Preset keystore fields updated.")
+          print("Debug keystore preset values configured.")
           PY
 
           test -s "$HOME/.android/debug.keystore"
-          grep -nE '^name=|^platform=|^keystore/debug' "$FILE"
+
+          grep -nE \
+            '^name=|^platform=|^version/target_sdk=|^keystore/debug' \
+            "$FILE"
 
       - name: Import Godot project
         shell: bash
@@ -178,7 +187,12 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/build"
 
+          echo "Starting Android APK export..."
+
           set +e
+          GODOT_ANDROID_KEYSTORE_DEBUG_PATH="$HOME/.android/debug.keystore" \
+          GODOT_ANDROID_KEYSTORE_DEBUG_USER="androiddebugkey" \
+          GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD="android" \
           godot --headless --verbose \
             --path neon-dash-runner \
             --export-debug "Android Debug" \
@@ -190,11 +204,11 @@ jobs:
 
           if [ "$RESULT" -ne 0 ] || \
              [ ! -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" ]; then
-            echo "Android export failed."
+            echo "Export failed. See export.log artifact."
             exit 1
           fi
 
-          echo "APK created successfully."
+          echo "APK export succeeded."
 
       - name: Generate checksum
         if: success()
@@ -204,7 +218,7 @@ jobs:
           cd "$GITHUB_WORKSPACE/build"
           sha256sum NeonDashRunner-debug.apk > SHA256SUMS.txt
 
-      - name: Upload APK and diagnostic logs
+      - name: Upload APK and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
