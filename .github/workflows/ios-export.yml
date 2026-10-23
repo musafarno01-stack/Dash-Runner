@@ -24,33 +24,114 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
-      - name: Set up Godot 4.4.1
+      - name: Install Godot 4.4.1
         uses: chickensoft-games/setup-godot@v2
         with:
           version: 4.4.1
           use-dotnet: false
           include-templates: true
 
-      - name: Verify project and iOS preset
+      - name: Create iOS preset if missing
         shell: bash
         run: |
           set -euo pipefail
 
+          python3 <<'PY'
+          import re
+          from pathlib import Path
+
+          path = Path("neon-dash-runner/export_presets.cfg")
+          if not Path("neon-dash-runner/project.godot").is_file():
+              raise SystemExit("ERROR: project.godot not found.")
+
+          if not path.is_file():
+              path.write_text("", encoding="utf-8")
+
+          content = path.read_text(encoding="utf-8")
+
+          # Reuse an existing iOS preset if one is already defined.
+          sections = re.split(r'(?m)(?=^\[)', content)
+          for section in sections:
+              if re.search(r'(?m)^platform="iOS"\s*$', section):
+                  if re.search(r'(?m)^name="iOS"\s*$', section):
+                      print("iOS preset already exists.")
+                      break
+          else:
+              # Find the next unused preset index.
+              indices = [
+                  int(n) for n in re.findall(
+                      r'(?m)^\[preset\.(\d+)\]\s*$', content
+                  )
+              ]
+              index = max(indices, default=-1) + 1
+
+              preset = f'''
+          [preset.{index}]
+          name="iOS"
+          platform="iOS"
+          runnable=false
+          dedicated_server=false
+          custom_features=""
+          export_filter="all_resources"
+          include_filter=""
+          exclude_filter=""
+          export_path=""
+          encryption_include_filters=""
+          encryption_exclude_filters=""
+          encrypt_pck=false
+          encrypt_directory=false
+
+          [preset.{index}.options]
+          application/app_store_team_id=""
+          application/provisioning_profile_uuid_debug=""
+          application/code_sign_identity_debug=""
+          application/provisioning_profile_uuid_release=""
+          application/code_sign_identity_release=""
+          application/bundle_identifier="com.musafarno01.neondashrunner"
+          application/short_version="1.0"
+          application/version="1.0"
+          application/targeted_device_family=2
+          '''
+
+              path.write_text(
+                  content.rstrip() + "\n" + preset.lstrip(),
+                  encoding="utf-8"
+              )
+              print(f"Created iOS preset at index {index}.")
+
+          # Validate that the required preset exists.
+          updated = path.read_text(encoding="utf-8")
+          if not re.search(
+              r'(?m)^name="iOS"\s*$',
+              updated
+          ) or not re.search(
+              r'(?m)^platform="iOS"\s*$',
+              updated
+          ):
+              raise SystemExit("ERROR: iOS preset validation failed.")
+
+          print("iOS export preset validation passed.")
+          PY
+
+      - name: Verify Godot and Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          godot --version
+          xcodebuild -version
+
           test -f neon-dash-runner/project.godot
           test -f neon-dash-runner/export_presets.cfg
 
-          if ! grep -q 'name="iOS"' neon-dash-runner/export_presets.cfg; then
-            echo 'Missing iOS export preset named "iOS".'
-            echo 'Create it in Godot: Project > Export > Add > iOS.'
-            exit 1
-          fi
-
-          godot --version
-
-      - name: Import project resources
+      - name: Import game resources
+        shell: bash
         run: |
+          set -euo pipefail
+
           godot --headless --editor \
-            --path neon-dash-runner --quit
+            --path neon-dash-runner \
+            --quit
 
       - name: Export iOS Xcode project
         shell: bash
@@ -59,14 +140,30 @@ jobs:
 
           mkdir -p "$GITHUB_WORKSPACE/build"
 
-          godot --headless \
+          godot --headless --verbose \
             --path neon-dash-runner \
             --export-debug "iOS" \
+            "$GITHUB_WORKSPACE/build/ios"
+
+          if [ ! -d "$GITHUB_WORKSPACE/build/ios" ]; then
+            echo "ERROR: iOS export directory was not created."
+            exit 1
+          fi
+
+          if ! find "$GITHUB_WORKSPACE/build/ios" \
+            -name '*.xcodeproj' -print -quit | grep -q .; then
+            echo "ERROR: No Xcode project found in export."
+            find "$GITHUB_WORKSPACE/build/ios" -maxdepth 3 -type f
+            exit 1
+          fi
+
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$GITHUB_WORKSPACE/build/ios" \
             "$GITHUB_WORKSPACE/build/NeonDashRunner-ios.zip"
 
-          test -s build/NeonDashRunner-ios.zip
+          test -s "$GITHUB_WORKSPACE/build/NeonDashRunner-ios.zip"
 
-      - name: Upload iOS export
+      - name: Upload iOS project
         uses: actions/upload-artifact@v4
         with:
           name: NeonDashRunner-iOS-Xcode
