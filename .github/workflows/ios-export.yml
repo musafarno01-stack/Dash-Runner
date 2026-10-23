@@ -1,55 +1,16 @@
+name: Build iOS IPA
 
-      - name: Build iOS IPA
-        shell: bash
-        timeout-minutes: 45
-        env:
-          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          PROFILE_UUID: ${{ secrets.APPLE_PROVISIONING_PROFILE_UUID }}
-        run: |
-          set -euo pipefail
+on:
+  workflow_dispatch:
 
-          PROJECT_DIR="$GITHUB_WORKSPACE/neon-dash-runner"
-          OUTPUT_DIR="$GITHUB_WORKSPACE/build/ipa"
+jobs:
+  build:
+    runs-on: macos-latest
 
-          mkdir -p "$OUTPUT_DIR"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-          if ! command -v godot >/dev/null 2>&1; then
-            echo "::error::Godot is not installed."
-            exit 1
-          fi
+      # Put your existing Godot setup step here.
 
-          if [[ ! -f "$PROJECT_DIR/project.godot" ]]; then
-            echo "::error::Godot project not found."
-            exit 1
-          fi
-
-          if [[ -z "$TEAM_ID" || -z "$PROFILE_UUID" ]]; then
-            echo "::error::Missing Apple signing secrets."
-            exit 1
-          fi
-
-          xcodebuild -version
-          godot --version
-
-          godot --headless --verbose \
-            --path "$PROJECT_DIR" \
-            --export-release "iOS" \
-            "$OUTPUT_DIR/NeonDashRunner.ipa"
-
-          IPA="$OUTPUT_DIR/NeonDashRunner.ipa"
-
-          if [[ ! -s "$IPA" ]]; then
-            echo "::error::Godot did not generate the IPA."
-            exit 1
-          fi
-
-          echo "IPA created successfully:"
-          ls -lh "$IPA"
-
-      - name: Upload IPA
-        uses: actions/upload-artifact@v4
-        with:
-          name: NeonDashRunner-IPA
-          path: build/ipa/NeonDashRunner.ipa
-          if-no-files-found: error
-          retention-days: 14
+      # Put your IPA build steps here.
