@@ -29,45 +29,30 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      # Important: v4 avoids the removed Android SDK "tools" package.
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
-        with:
-          packages: platform-tools
 
       - name: Install Android SDK components
         shell: bash
         run: |
           set -euo pipefail
-
-          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-
-          if [ -z "$SDK_ROOT" ]; then
-            echo "::error::Android SDK path was not configured."
-            exit 1
-          fi
-
-          echo "Android SDK: $SDK_ROOT"
-
-          sdkmanager --sdk_root="$SDK_ROOT" --install \
+          sdkmanager --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.1"
+          sdkmanager --licenses
 
-          sdkmanager --sdk_root="$SDK_ROOT" --licenses
-
-      - name: Install Godot 4.4.1 and export templates
+      - name: Install Godot and export templates
         uses: chickensoft-games/setup-godot@v2
         with:
           version: 4.4.1
           use-dotnet: false
           include-templates: true
 
-      - name: Configure Android debug signing
+      - name: Create debug keystore
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$HOME/.android"
 
           keytool -genkeypair -noprompt \
@@ -84,43 +69,29 @@ jobs:
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
           echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
 
-      - name: Verify project and Android preset
+      - name: Verify project and preset
         shell: bash
         run: |
           set -euo pipefail
 
           test -f neon-dash-runner/project.godot
-          test -f neon-dash-runner/main.tscn
-          test -f neon-dash-runner/main.gd
+          test -f neon-dash-runner/export_presets.cfg
 
-          PRESETS="neon-dash-runner/export_presets.cfg"
+          grep -Fq 'name="Android Debug"' \
+            neon-dash-runner/export_presets.cfg
 
-          if [ ! -f "$PRESETS" ]; then
-            echo "::error::Missing $PRESETS. Create an Android export preset in Godot and commit it."
-            exit 1
-          fi
-
-          if ! grep -Fq 'name="Android Debug"' "$PRESETS"; then
-            echo "::error::The export preset must be named exactly Android Debug."
-            exit 1
-          fi
-
-      - name: Import Godot project
+      - name: Import project
         shell: bash
         run: |
           set -euo pipefail
-
           godot --version
-
           godot --headless --editor \
-            --path neon-dash-runner \
-            --quit
+            --path neon-dash-runner --quit
 
-      - name: Export Android debug APK
+      - name: Export debug APK
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$GITHUB_WORKSPACE/build"
 
           godot --headless \
@@ -130,19 +101,14 @@ jobs:
 
           test -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
 
-          echo "APK export completed."
-          ls -lh "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
-
-      - name: Generate SHA-256 checksum
+      - name: Generate checksum
         shell: bash
         run: |
           set -euo pipefail
-
           cd "$GITHUB_WORKSPACE/build"
           sha256sum NeonDashRunner-debug.apk > SHA256SUMS.txt
-          cat SHA256SUMS.txt
 
-      - name: Upload Android APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: NeonDashRunner-Android-Debug
