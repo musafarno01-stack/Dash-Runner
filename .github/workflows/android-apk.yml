@@ -17,14 +17,14 @@ permissions:
 jobs:
   build-android:
     name: Export Android Debug APK
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -39,46 +39,49 @@ jobs:
             "platforms;android-35" \
             "build-tools;35.0.0"
 
-      - name: Install Godot and export templates
+      - name: Install Godot 4.4.1 and export templates
         uses: chickensoft-games/setup-godot@v2
         with:
           version: 4.4.1
           use-dotnet: false
           include-templates: true
 
-      - name: Verify project configuration
+      - name: Verify required files
+        shell: bash
         run: |
+          set -euo pipefail
           test -f neon-dash-runner/project.godot
           test -f neon-dash-runner/main.tscn
           test -f neon-dash-runner/main.gd
+          test -f neon-dash-runner/export_presets.cfg
 
-          if [ ! -f neon-dash-runner/export_presets.cfg ]; then
-            echo "::error::Missing neon-dash-runner/export_presets.cfg. Create an Android export preset named Android Debug in Godot."
-            exit 1
-          fi
+          grep -F 'name="Android Debug"' \
+            neon-dash-runner/export_presets.cfg
 
-      - name: Import Godot project
+      - name: Import project
         run: |
           godot --headless --editor \
             --path neon-dash-runner --quit
 
       - name: Export debug APK
+        shell: bash
         run: |
+          set -euo pipefail
           mkdir -p build
 
           godot --headless \
             --path neon-dash-runner \
             --export-debug "Android Debug" \
-            ../build/NeonDashRunner-debug.apk
+            build/NeonDashRunner-debug.apk
 
           test -s build/NeonDashRunner-debug.apk
 
-      - name: Generate checksum
+      - name: Generate SHA-256 checksum
         run: |
           sha256sum build/NeonDashRunner-debug.apk \
             > build/SHA256SUMS.txt
 
-      - name: Upload APK
+      - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
           name: NeonDashRunner-Android-Debug
