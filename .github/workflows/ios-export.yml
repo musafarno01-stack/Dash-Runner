@@ -16,15 +16,16 @@ jobs:
     timeout-minutes: 60
 
     env:
+      GODOT_VERSION: "4.4.1"
       BUNDLE_ID: com.musafarno01.neondashrunner
-      GODOT_VERSION: 4.4.1
       TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      PROJECT_DIR: neon-dash-runner
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Validate signing secrets
+      - name: Validate secrets and environment
         shell: bash
         env:
           P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
@@ -33,27 +34,42 @@ jobs:
         run: |
           set -euo pipefail
 
-          [[ -n "$P12_BASE64" ]] || {
-            echo "::error::Missing APPLE_CERTIFICATE_P12_BASE64."
-            exit 1
-          }
+          for name in P12_BASE64 P12_PASSWORD PROFILE_BASE64 TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Required signing secret is missing: $name"
+              exit 1
+            fi
+          done
 
-          [[ -n "$P12_PASSWORD" ]] || {
-            echo "::error::Missing APPLE_CERTIFICATE_PASSWORD."
+          if [[ ! "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]; then
+            echo "::error::APPLE_TEAM_ID must be a 10-character Apple Team ID."
             exit 1
-          }
+          fi
 
-          [[ -n "$PROFILE_BASE64" ]] || {
-            echo "::error::Missing APPLE_PROVISIONING_PROFILE_BASE64."
+          if [[ ! -f "$PROJECT_DIR/project.godot" ]]; then
+            echo "::error::Missing $PROJECT_DIR/project.godot"
             exit 1
-          }
+          fi
 
-          [[ -n "$TEAM_ID" ]] || {
-            echo "::error::Missing APPLE_TEAM_ID."
+          if [[ ! -f "$PROJECT_DIR/export_presets.cfg" ]]; then
+            echo "::error::Missing $PROJECT_DIR/export_presets.cfg"
             exit 1
-          }
+          fi
 
-          echo "All required signing secrets are present."
+          echo "Required secrets and project files are present."
+
+      - name: Select Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcode-select -p
+          xcodebuild -version
+
+          if ! xcodebuild -showsdks | grep -q 'iphoneos'; then
+            echo "::error::The selected Xcode installation has no iOS SDK."
+            exit 1
+          fi
 
       - name: Install Godot
         shell: bash
@@ -74,7 +90,7 @@ jobs:
             -type f -name Godot -perm -111 -print -quit)"
 
           if [[ -z "$GODOT_BIN" ]]; then
-            echo "::error::Godot executable not found."
+            echo "::error::Godot executable was not found."
             find "$RUNNER_TEMP/godot" -maxdepth 5 -print
             exit 1
           fi
@@ -84,7 +100,7 @@ jobs:
 
           "$GODOT_BIN" --version
 
-      - name: Install iOS export templates
+      - name: Install Godot export templates
         shell: bash
         run: |
           set -euo pipefail
@@ -107,8 +123,7 @@ jobs:
           fi
 
           if [[ -z "$SOURCE" || ! -d "$SOURCE" ]]; then
-            echo "::error::Godot export templates were not found."
-            find "$RUNNER_TEMP/templates" -maxdepth 4 -print
+            echo "::error::Godot templates directory not found."
             exit 1
           fi
 
@@ -117,15 +132,15 @@ jobs:
           mkdir -p "$DEST"
           cp -R "$SOURCE/." "$DEST/"
 
-          if [[ ! -f "$DEST/ios.zip" ]]; then
-            echo "::error::The installed templates do not contain ios.zip."
+          if [[ ! -s "$DEST/ios.zip" ]]; then
+            echo "::error::Godot iOS template ios.zip is missing."
             find "$DEST" -maxdepth 2 -print
             exit 1
           fi
 
-          echo "Godot iOS export templates installed."
+          echo "Godot iOS templates installed."
 
-      - name: Install Apple signing certificate and profile
+      - name: Install Apple signing assets
         shell: bash
         env:
           P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
@@ -144,7 +159,7 @@ jobs:
             base64 -D > "$RUNNER_TEMP/profile.mobileprovision"
 
           [[ -s "$RUNNER_TEMP/certificate.p12" ]] || {
-            echo "::error::Decoded certificate is empty."
+            echo "::error::Decoded P12 file is empty."
             exit 1
           }
 
@@ -178,11 +193,11 @@ jobs:
           security default-keychain -d user -s "$KEYCHAIN"
 
           security find-identity -v -p codesigning "$KEYCHAIN" \
-            | tee "$RUNNER_TEMP/signing-identities.txt"
+            | tee "$RUNNER_TEMP/identities.txt"
 
-          if ! grep -q 'Apple Distribution' \
-            "$RUNNER_TEMP/signing-identities.txt"; then
-            echo "::error::No valid Apple Distribution identity was found."
+          if ! grep -q 'Apple Distribution:' \
+            "$RUNNER_TEMP/identities.txt"; then
+            echo "::error::No valid Apple Distribution identity found."
             exit 1
           fi
 
@@ -201,19 +216,57 @@ jobs:
             "$RUNNER_TEMP/profile.plist")
 
           if [[ "$PROFILE_TEAM" != "$TEAM_ID" ]]; then
-            echo "::error::Provisioning profile team ID does not match APPLE_TEAM_ID."
+            echo "::error::Profile Team ID does not match APPLE_TEAM_ID."
             exit 1
           fi
 
-          case "$PROFILE_APP_ID" in
-            *."$BUNDLE_ID"|*".*")
-              echo "Provisioning profile bundle ID pattern is compatible."
-              ;;
-            *)
-              echo "::error::Provisioning profile does not match $BUNDLE_ID."
-              exit 1
-              ;;
-          esac
+          if ! PROFILE_APP_ID="$PROFILE_APP_ID" \
+            TEAM_ID="$TEAM_ID" BUNDLE_ID="$BUNDLE_ID" \
+            python3 - <<'PY'
+          import os, sys
+
+          app_id = os.environ["PROFILE_APP_ID"]
+          team = os.environ["TEAM_ID"]
+          bundle = os.environ["BUNDLE_ID"]
+
+          prefix = team + "."
+          if not app_id.startswith(prefix):
+              sys.exit("Profile application identifier has the wrong team prefix")
+
+          pattern = app_id[len(prefix):]
+
+          matches = (
+              pattern == bundle
+              or (
+                  pattern.endswith(".*")
+                  and bundle.startswith(pattern[:-2] + ".")
+              )
+          )
+
+          if not matches:
+              sys.exit(
+                  f"Profile identifier {app_id!r} does not match {bundle!r}"
+              )
+          PY
+          then
+            echo "::error::Provisioning profile does not match the bundle ID."
+            exit 1
+          fi
+
+          EXPIRATION=$(/usr/libexec/PlistBuddy \
+            -c 'Print :ExpirationDate' "$RUNNER_TEMP/profile.plist")
+
+          EXPIRATION="$EXPIRATION" python3 - <<'PY'
+          import os
+          import sys
+          from datetime import datetime, timezone
+
+          raw = os.environ["EXPIRATION"]
+          expiry = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+          if expiry <= datetime.now(timezone.utc):
+              sys.exit("Provisioning profile has expired")
+          PY
 
           PROFILE_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
           mkdir -p "$PROFILE_DIR"
@@ -223,55 +276,42 @@ jobs:
 
           {
             echo "PROFILE_UUID=$PROFILE_UUID"
+            echo "GODOT_IOS_PROVISIONING_PROFILE_UUID_DEBUG=$PROFILE_UUID"
+            echo "GODOT_IOS_PROVISIONING_PROFILE_UUID_RELEASE=$PROFILE_UUID"
           } >> "$GITHUB_ENV"
 
-          echo "Apple signing certificate and profile installed."
+          echo "Provisioning profile validated and installed."
 
       - name: Import Godot project resources
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_DIR="$GITHUB_WORKSPACE/neon-dash-runner"
-
-          if [[ ! -f "$PROJECT_DIR/project.godot" ]]; then
-            echo "::error::Missing project.godot in neon-dash-runner."
-            exit 1
-          fi
-
-          if [[ ! -f "$PROJECT_DIR/export_presets.cfg" ]]; then
-            echo "::error::Missing export_presets.cfg."
-            exit 1
-          fi
-
           "$GODOT_BIN" --headless \
             --path "$PROJECT_DIR" \
             --editor --import --quit
 
-      - name: Export Godot iOS Xcode project
+      - name: Export Godot iOS project
         shell: bash
         run: |
           set -euo pipefail
 
-          PROJECT_DIR="$GITHUB_WORKSPACE/neon-dash-runner"
           OUTPUT_DIR="$GITHUB_WORKSPACE/build/ios"
+          EXTRACT_DIR="$OUTPUT_DIR/extracted"
 
-          mkdir -p "$OUTPUT_DIR"
+          mkdir -p "$OUTPUT_DIR" "$EXTRACT_DIR"
 
           "$GODOT_BIN" --headless --verbose \
             --path "$PROJECT_DIR" \
-            --export-debug "iOS" \
+            --export-release "iOS" \
             "$OUTPUT_DIR/NeonDashRunner.zip"
 
           ZIP="$OUTPUT_DIR/NeonDashRunner.zip"
 
           if [[ ! -s "$ZIP" ]]; then
-            echo "::error::Godot did not produce an iOS export ZIP."
+            echo "::error::Godot did not generate the export ZIP."
             exit 1
           fi
-
-          EXTRACT_DIR="$OUTPUT_DIR/extracted"
-          mkdir -p "$EXTRACT_DIR"
 
           unzip -q "$ZIP" -d "$EXTRACT_DIR"
 
@@ -279,7 +319,7 @@ jobs:
             -type d -name '*.xcodeproj' -print -quit)"
 
           if [[ -z "$PROJECT" ]]; then
-            echo "::error::No Xcode project found in Godot export."
+            echo "::error::Export ZIP contains no Xcode project."
             find "$EXTRACT_DIR" -maxdepth 5 -print
             exit 1
           fi
@@ -287,7 +327,7 @@ jobs:
           echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
           echo "Found Xcode project: $PROJECT"
 
-      - name: Archive and export signed IPA
+      - name: Archive and export IPA
         shell: bash
         run: |
           set -euo pipefail
@@ -329,10 +369,10 @@ jobs:
             CODE_SIGNING_ALLOWED=YES \
             archive
 
-          if [[ ! -d "$ARCHIVE" ]]; then
+          [[ -d "$ARCHIVE" ]] || {
             echo "::error::Xcode archive was not created."
             exit 1
-          fi
+          }
 
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -364,14 +404,14 @@ jobs:
             -maxdepth 1 -type f -name '*.ipa' -print -quit)"
 
           if [[ -z "$IPA" || ! -s "$IPA" ]]; then
-            echo "::error::Xcode did not generate a valid IPA file."
-            find "$EXPORT_DIR" -maxdepth 2 -print
+            echo "::error::Xcode did not generate an IPA."
+            find "$EXPORT_DIR" -maxdepth 3 -print
             exit 1
           fi
 
           cp "$IPA" "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
 
-          echo "IPA generated successfully."
+          echo "IPA created:"
           ls -lh "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
 
       - name: Upload IPA
