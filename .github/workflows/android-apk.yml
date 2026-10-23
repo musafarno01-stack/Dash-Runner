@@ -33,11 +33,16 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Install Android SDK components
+        shell: bash
         run: |
+          set -euo pipefail
+
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.0"
+
+          yes | sdkmanager --licenses >/dev/null || true
 
       - name: Install Godot 4.4.1 and export templates
         uses: chickensoft-games/setup-godot@v2
@@ -46,24 +51,34 @@ jobs:
           use-dotnet: false
           include-templates: true
 
-      - name: Verify required files
+      - name: Verify project files
         shell: bash
         run: |
           set -euo pipefail
+
           test -f neon-dash-runner/project.godot
           test -f neon-dash-runner/main.tscn
           test -f neon-dash-runner/main.gd
-          test -f neon-dash-runner/export_presets.cfg
 
-          grep -F 'name="Android Debug"' \
-            neon-dash-runner/export_presets.cfg
+          if [ ! -f neon-dash-runner/export_presets.cfg ]; then
+            echo "::error::Missing export_presets.cfg. Create an Android preset in Godot."
+            exit 1
+          fi
 
-      - name: Import project
+          if ! grep -Fq 'name="Android Debug"' \
+            neon-dash-runner/export_presets.cfg; then
+            echo "::error::Export preset must be named Android Debug."
+            exit 1
+          fi
+
+      - name: Import Godot project
+        shell: bash
         run: |
+          set -euo pipefail
           godot --headless --editor \
             --path neon-dash-runner --quit
 
-      - name: Export debug APK
+      - name: Export Android debug APK
         shell: bash
         run: |
           set -euo pipefail
@@ -72,12 +87,14 @@ jobs:
           godot --headless \
             --path neon-dash-runner \
             --export-debug "Android Debug" \
-            build/NeonDashRunner-debug.apk
+            ../build/NeonDashRunner-debug.apk
 
           test -s build/NeonDashRunner-debug.apk
 
       - name: Generate SHA-256 checksum
+        shell: bash
         run: |
+          set -euo pipefail
           sha256sum build/NeonDashRunner-debug.apk \
             > build/SHA256SUMS.txt
 
