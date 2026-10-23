@@ -1,172 +1,111 @@
 
-name: Build iOS Export
-
-on:
-  workflow_dispatch:
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - "neon-dash-runner/**"
-      - ".github/workflows/ios-export.yml"
-
-permissions:
-  contents: read
-
-jobs:
-  export-ios:
-    name: Export Neon Dash Runner for iOS
-    runs-on: macos-14
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      - name: Install Godot 4.4.1
-        uses: chickensoft-games/setup-godot@v2
-        with:
-          version: 4.4.1
-          use-dotnet: false
-          include-templates: true
-
-      - name: Create iOS preset if missing
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          python3 <<'PY'
-          import re
-          from pathlib import Path
-
-          path = Path("neon-dash-runner/export_presets.cfg")
-          if not Path("neon-dash-runner/project.godot").is_file():
-              raise SystemExit("ERROR: project.godot not found.")
-
-          if not path.is_file():
-              path.write_text("", encoding="utf-8")
-
-          content = path.read_text(encoding="utf-8")
-
-          # Reuse an existing iOS preset if one is already defined.
-          sections = re.split(r'(?m)(?=^\[)', content)
-          for section in sections:
-              if re.search(r'(?m)^platform="iOS"\s*$', section):
-                  if re.search(r'(?m)^name="iOS"\s*$', section):
-                      print("iOS preset already exists.")
-                      break
-          else:
-              # Find the next unused preset index.
-              indices = [
-                  int(n) for n in re.findall(
-                      r'(?m)^\[preset\.(\d+)\]\s*$', content
-                  )
-              ]
-              index = max(indices, default=-1) + 1
-
-              preset = f'''
-          [preset.{index}]
-          name="iOS"
-          platform="iOS"
-          runnable=false
-          dedicated_server=false
-          custom_features=""
-          export_filter="all_resources"
-          include_filter=""
-          exclude_filter=""
-          export_path=""
-          encryption_include_filters=""
-          encryption_exclude_filters=""
-          encrypt_pck=false
-          encrypt_directory=false
-
-          [preset.{index}.options]
-          application/app_store_team_id=""
-          application/provisioning_profile_uuid_debug=""
-          application/code_sign_identity_debug=""
-          application/provisioning_profile_uuid_release=""
-          application/code_sign_identity_release=""
-          application/bundle_identifier="com.musafarno01.neondashrunner"
-          application/short_version="1.0"
-          application/version="1.0"
-          application/targeted_device_family=2
-          '''
-
-              path.write_text(
-                  content.rstrip() + "\n" + preset.lstrip(),
-                  encoding="utf-8"
-              )
-              print(f"Created iOS preset at index {index}.")
-
-          # Validate that the required preset exists.
-          updated = path.read_text(encoding="utf-8")
-          if not re.search(
-              r'(?m)^name="iOS"\s*$',
-              updated
-          ) or not re.search(
-              r'(?m)^platform="iOS"\s*$',
-              updated
-          ):
-              raise SystemExit("ERROR: iOS preset validation failed.")
-
-          print("iOS export preset validation passed.")
-          PY
-
-      - name: Verify Godot and Xcode
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          godot --version
-          xcodebuild -version
-
-          test -f neon-dash-runner/project.godot
-          test -f neon-dash-runner/export_presets.cfg
-
-      - name: Import game resources
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          godot --headless --editor \
-            --path neon-dash-runner \
-            --quit
-
       - name: Export iOS Xcode project
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$GITHUB_WORKSPACE/build"
+          mkdir -p "$GITHUB_WORKSPACE/build/ios"
 
-          godot --headless --verbose \
-            --path neon-dash-runner \
+          godot --headless \
+            --path "$GITHUB_WORKSPACE/neon-dash-runner" \
             --export-debug "iOS" \
             "$GITHUB_WORKSPACE/build/ios"
 
-          if [ ! -d "$GITHUB_WORKSPACE/build/ios" ]; then
-            echo "ERROR: iOS export directory was not created."
+          PROJECT="$(find "$GITHUB_WORKSPACE/build/ios" \
+            -maxdepth 3 -name '*.xcodeproj' -print -quit)"
+
+          if [[ -z "$PROJECT" ]]; then
+            echo "ERROR: No Xcode project was exported."
             exit 1
           fi
 
-          if ! find "$GITHUB_WORKSPACE/build/ios" \
-            -name '*.xcodeproj' -print -quit | grep -q .; then
-            echo "ERROR: No Xcode project found in export."
-            find "$GITHUB_WORKSPACE/build/ios" -maxdepth 3 -type f
+          echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Archive and export signed IPA
+        shell: bash
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE_UUID: ${{ secrets.APPLE_PROVISIONING_PROFILE_UUID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$TEAM_ID" || -z "$PROFILE_UUID" ]]; then
+            echo "ERROR: Configure APPLE_TEAM_ID and APPLE_PROVISIONING_PROFILE_UUID."
             exit 1
           fi
 
-          ditto -c -k --sequesterRsrc --keepParent \
-            "$GITHUB_WORKSPACE/build/ios" \
-            "$GITHUB_WORKSPACE/build/NeonDashRunner-ios.zip"
+          PROJECT="$XCODE_PROJECT"
+          BUNDLE_ID="com.musafarno01.neondashrunner"
+          ARCHIVE="$GITHUB_WORKSPACE/build/NeonDashRunner.xcarchive"
+          EXPORT_DIR="$GITHUB_WORKSPACE/build/ipa"
 
-          test -s "$GITHUB_WORKSPACE/build/NeonDashRunner-ios.zip"
+          mkdir -p "$EXPORT_DIR"
 
-      - name: Upload iOS project
+          SCHEME="$(xcodebuild -list -json -project "$PROJECT" |
+            python3 -c '
+          import json, sys
+          d = json.load(sys.stdin)
+          p = d["project"]
+          schemes = p.get("schemes", [])
+          if not schemes:
+              raise SystemExit("ERROR: No Xcode scheme found.")
+          print(schemes[0])
+          ')"
+
+          xcodebuild \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            archive
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>$TEAM_ID</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$BUNDLE_ID</key>
+              <string>$PROFILE_UUID</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportPath "$EXPORT_DIR" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+          IPA="$(find "$EXPORT_DIR" -maxdepth 1 \
+            -type f -name '*.ipa' -print -quit)"
+
+          if [[ -z "$IPA" ]]; then
+            echo "ERROR: IPA file was not generated."
+            exit 1
+          fi
+
+          cp "$IPA" "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
+
+          echo "IPA successfully created:"
+          ls -lh "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
+
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NeonDashRunner-iOS-Xcode
-          path: build/NeonDashRunner-ios.zip
+          name: NeonDashRunner-IPA
+          path: build/NeonDashRunner.ipa
           if-no-files-found: error
           retention-days: 14
