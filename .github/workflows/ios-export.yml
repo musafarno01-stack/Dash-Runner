@@ -10,44 +10,48 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: unsigned-ios-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
+    name: Build Godot iOS IPA
     runs-on: macos-15
     timeout-minutes: 60
 
     env:
       GODOT_VERSION: "4.4.1"
       PROJECT_DIR: neon-dash-runner
+      BUNDLE_ID: com.musafarno01.neondashrunner
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Check project
+      - name: Validate project
         shell: bash
         run: |
           set -euo pipefail
 
-          test -f "$PROJECT_DIR/project.godot" || {
-            echo "::error::Godot project not found"
+          test -f "$PROJECT_DIR/project.godot"
+          test -f "$PROJECT_DIR/export_presets.cfg"
+
+          grep -q 'name="iOS"' "$PROJECT_DIR/export_presets.cfg" || {
+            echo "::error::An iOS export preset is required."
             exit 1
           }
 
-          test -f "$PROJECT_DIR/export_presets.cfg" || {
-            echo "::error::export_presets.cfg not found"
-            exit 1
-          }
+          echo "Godot project validated."
 
-          echo "Godot project found."
-
-      - name: Install Godot 4.4.1
+      - name: Install Godot
         shell: bash
         run: |
           set -euo pipefail
 
           URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
 
-          curl -fL --retry 3 "$URL" \
+          curl -fL --retry 3 --retry-delay 2 "$URL" \
             -o "$RUNNER_TEMP/godot.zip"
 
           mkdir -p "$RUNNER_TEMP/godot"
@@ -58,7 +62,7 @@ jobs:
             -type f -name Godot -perm -111 -print -quit)"
 
           if [[ -z "$GODOT_BIN" ]]; then
-            echo "::error::Godot executable not found"
+            echo "::error::Godot executable not found."
             exit 1
           fi
 
@@ -67,14 +71,14 @@ jobs:
 
           "$GODOT_BIN" --version
 
-      - name: Install Godot export templates
+      - name: Install export templates
         shell: bash
         run: |
           set -euo pipefail
 
           URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
 
-          curl -fL --retry 3 "$URL" \
+          curl -fL --retry 3 --retry-delay 2 "$URL" \
             -o "$RUNNER_TEMP/templates.tpz"
 
           mkdir -p "$RUNNER_TEMP/templates"
@@ -89,7 +93,7 @@ jobs:
           fi
 
           if [[ -z "$SOURCE" || ! -d "$SOURCE" ]]; then
-            echo "::error::Export templates not found"
+            echo "::error::Export templates not found."
             exit 1
           fi
 
@@ -99,59 +103,93 @@ jobs:
           cp -R "$SOURCE/." "$DEST/"
 
           if [[ ! -s "$DEST/ios.zip" ]]; then
-            echo "::error::iOS export template missing"
+            echo "::error::Godot iOS export template is missing."
+            ls -la "$DEST"
             exit 1
           fi
 
-          echo "iOS templates installed."
+          echo "Godot iOS templates installed."
 
       - name: Configure iOS export preset
         shell: bash
         run: |
           set -euo pipefail
 
-          python3 - "$PROJECT_DIR/export_presets.cfg" <<'PY'
+          python3 - "$PROJECT_DIR/export_presets.cfg" "$BUNDLE_ID" <<'PY'
+          import re
           import sys
           from pathlib import Path
 
           path = Path(sys.argv[1])
+          bundle_id = sys.argv[2]
           text = path.read_text()
 
-          section = "[preset.1.options]"
-          if section not in text:
+          sections = list(re.finditer(
+              r'(?m)^\[([^\]]+)\]\s*$', text
+          ))
+
+          preset_index = None
+
+          for i, match in enumerate(sections):
+              section_name = match.group(1)
+
+              if not re.fullmatch(r'preset\.\d+', section_name):
+                  continue
+
+              end = sections[i + 1].start() if i + 1 < len(sections) else len(text)
+              body = text[match.end():end]
+
+              if re.search(r'(?m)^name\s*=\s*"iOS"\s*$', body):
+                  preset_index = section_name.split(".")[1]
+                  break
+
+          if preset_index is None:
+              raise SystemExit("Could not locate the iOS export preset.")
+
+          options_name = f"preset.{preset_index}.options"
+          options_header = f"[{options_name}]"
+
+          if options_header not in text:
               raise SystemExit(
-                  "iOS options section [preset.1.options] not found"
+                  f"Missing {options_header} in export_presets.cfg."
               )
 
-          before, rest = text.split(section, 1)
-          lines = rest.splitlines()
+          parts = text.split(options_header, 1)
+          before, remainder = parts
+          next_section = re.search(r'(?m)^\[[^\]]+\]\s*$', remainder)
+
+          if next_section:
+              options = remainder[:next_section.start()]
+              after = remainder[next_section.start():]
+          else:
+              options = remainder
+              after = ""
 
           values = {
-              "application/app_store_team_id": "AAAAAAAAAA",
-              "application/identifier":
-                  "com.musafarno01.neondashrunner",
+              "application/identifier": bundle_id,
+              "application/app_store_team_id": "",
           }
 
-          found = set()
-
-          for i, line in enumerate(lines):
-              stripped = line.strip()
-
-              for key, value in values.items():
-                  if stripped.startswith(key + "="):
-                      lines[i] = f'{key}="{value}"'
-                      found.add(key)
-
           for key, value in values.items():
-              if key not in found:
-                  lines.insert(0, f'{key}="{value}"')
+              pattern = re.compile(
+                  r'(?m)^' + re.escape(key) + r'\s*=.*$'
+              )
+              replacement = f'{key}="{value}"'
+
+              if pattern.search(options):
+                  options = pattern.sub(
+                      lambda _: replacement, options, count=1
+                  )
+              else:
+                  options += "\n" + replacement
 
           path.write_text(
-              before + section + "\n" + "\n".join(lines) + "\n"
+              before + options_header + options + after
           )
 
-          print("Updated iOS bundle identifier.")
-          print("Set placeholder Team ID for unsigned export attempt.")
+          print(f"iOS preset: {preset_index}")
+          print(f"Bundle ID: {bundle_id}")
+          print("Signing team ID cleared for unsigned build.")
           PY
 
       - name: Import project resources
@@ -163,7 +201,7 @@ jobs:
             --path "$PROJECT_DIR" \
             --editor --import --quit
 
-      - name: Export iOS Xcode project
+      - name: Export Xcode project
         shell: bash
         run: |
           set -euo pipefail
@@ -178,10 +216,10 @@ jobs:
 
           ZIP="$OUTPUT/NeonDashRunner.zip"
 
-          test -s "$ZIP" || {
-            echo "::error::Godot iOS export failed"
+          if [[ ! -s "$ZIP" ]]; then
+            echo "::error::Godot did not create the iOS export ZIP."
             exit 1
-          }
+          fi
 
           EXTRACT="$OUTPUT/extracted"
           mkdir -p "$EXTRACT"
@@ -191,13 +229,13 @@ jobs:
             -type d -name '*.xcodeproj' -print -quit)"
 
           if [[ -z "$XCODE_PROJECT" ]]; then
-            echo "::error::No Xcode project found"
+            echo "::error::No Xcode project found in Godot export."
             find "$EXTRACT" -maxdepth 5 -print
             exit 1
           fi
 
           echo "XCODE_PROJECT=$XCODE_PROJECT" >> "$GITHUB_ENV"
-          echo "Found Xcode project: $XCODE_PROJECT"
+          echo "Xcode project exported successfully."
 
       - name: Build unsigned iOS app
         shell: bash
@@ -206,18 +244,30 @@ jobs:
 
           DERIVED="$RUNNER_TEMP/DerivedData"
 
-          SCHEMES="$(xcodebuild -list -json \
-            -project "$XCODE_PROJECT")"
+          xcodebuild -list -json \
+            -project "$XCODE_PROJECT" \
+            > "$RUNNER_TEMP/xcode-list.json"
 
-          SCHEME="$(printf '%s' "$SCHEMES" |
-            python3 -c '
-          import json, sys
-          data = json.load(sys.stdin)
+          SCHEME="$(python3 - "$RUNNER_TEMP/xcode-list.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as f:
+              data = json.load(f)
+
           schemes = data.get("project", {}).get("schemes", [])
+
           if not schemes:
-              raise SystemExit("No Xcode scheme found")
-          print(schemes[0])
-          ')"
+              raise SystemExit("No Xcode build schemes found.")
+
+          preferred = next(
+              (s for s in schemes if s == "NeonDashRunner"),
+              schemes[0]
+          )
+
+          print(preferred)
+          PY
+          )"
 
           echo "Building scheme: $SCHEME"
 
@@ -229,52 +279,61 @@ jobs:
             -derivedDataPath "$DERIVED" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
             build
 
           APP_DIR="$DERIVED/Build/Products/Release-iphoneos"
 
           APP_PATH="$(find "$APP_DIR" \
-            -maxdepth 2 -type d -name '*.app' -print -quit)"
+            -maxdepth 3 -type d -name '*.app' -print -quit)"
 
           if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
-            echo "::error::Unsigned iOS app was not built"
-            find "$DERIVED/Build/Products" \
-              -maxdepth 4 -print || true
+            echo "::error::Build succeeded but no .app was found."
+            find "$DERIVED/Build/Products" -maxdepth 5 -print || true
+            exit 1
+          fi
+
+          if [[ ! -f "$APP_PATH/Info.plist" ]]; then
+            echo "::error::Built app has no Info.plist."
             exit 1
           fi
 
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
-          echo "Unsigned app built."
+          echo "Unsigned iOS app built."
 
-      - name: Package unsigned IPA
+      - name: Package and validate IPA
         shell: bash
         run: |
           set -euo pipefail
 
           OUTPUT="$GITHUB_WORKSPACE/build/unsigned-ipa"
-          mkdir -p "$OUTPUT/Payload"
+          IPA="$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
+
+          rm -rf "$OUTPUT"
+          mkdir -p "$OUTPUT/Payload" "$(dirname "$IPA")"
 
           ditto "$APP_PATH" \
             "$OUTPUT/Payload/NeonDashRunner.app"
 
           (
             cd "$OUTPUT"
-            /usr/bin/zip -qry \
-              "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa" \
-              Payload
+            /usr/bin/zip -qry "$IPA" Payload
           )
 
-          IPA="$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
+          test -s "$IPA"
 
-          test -s "$IPA" || {
-            echo "::error::IPA was not created"
+          unzip -tq "$IPA"
+
+          if ! unzip -Z1 "$IPA" | \
+            grep -q '^Payload/[^/]*.app/Info.plist$'; then
+            echo "::error::IPA validation failed: Info.plist missing."
             exit 1
-          }
+          fi
 
-          echo "IPA package created:"
+          echo "IPA created and archive validated."
           ls -lh "$IPA"
 
-      - name: Upload IPA artifact
+      - name: Upload unsigned IPA
         uses: actions/upload-artifact@v4
         with:
           name: NeonDashRunner-Unsigned-IPA
