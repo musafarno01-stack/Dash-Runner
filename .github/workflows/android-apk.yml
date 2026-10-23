@@ -4,9 +4,7 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
-      - master
+    branches: [main, master]
     paths:
       - "neon-dash-runner/**"
       - ".github/workflows/android-apk.yml"
@@ -37,35 +35,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" >> "$GITHUB_ENV"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          test -n "$SDK"
 
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+          yes | sdkmanager --sdk_root="$SDK" --licenses || true
 
-          sdkmanager --install \
+          sdkmanager --sdk_root="$SDK" --install \
             "platform-tools" \
             "platforms;android-35" \
             "build-tools;35.0.1"
 
-      - name: Install Godot and export templates
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+
+      - name: Install Godot 4.4.1 and export templates
         uses: chickensoft-games/setup-godot@v2
         with:
           version: 4.4.1
           use-dotnet: false
           include-templates: true
 
-      - name: Configure Android export settings
+      - name: Create debug keystore
         shell: bash
         run: |
           set -euo pipefail
 
-          SDK_PATH="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          test -n "$SDK_PATH"
-          test -d "$SDK_PATH/platform-tools"
-          test -n "${JAVA_HOME:-}"
-          test -x "$JAVA_HOME/bin/java"
-
-          mkdir -p "$HOME/.android" "$HOME/.config/godot"
+          mkdir -p "$HOME/.android"
 
           keytool -genkeypair -noprompt \
             -keystore "$HOME/.android/debug.keystore" \
@@ -77,52 +72,108 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
+          test -s "$HOME/.android/debug.keystore"
+
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
+          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
+
+      - name: Configure Godot Android settings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          test -x "$JAVA_HOME/bin/java"
+          test -x "$SDK/platform-tools/adb"
+          test -d "$SDK/platforms/android-35"
+          test -d "$SDK/build-tools/35.0.1"
+
+          mkdir -p "$HOME/.config/godot"
+
           cat > "$HOME/.config/godot/editor_settings-4.4.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
 
           [resource]
-          export/android/android_sdk_path = "$SDK_PATH"
+          export/android/android_sdk_path = "$SDK"
           export/android/java_sdk_path = "$JAVA_HOME"
           export/android/debug_keystore = "$HOME/.android/debug.keystore"
           export/android/debug_keystore_user = "androiddebugkey"
           export/android/debug_keystore_pass = "android"
           EOF
 
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PATH=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_USER=androiddebugkey" >> "$GITHUB_ENV"
-          echo "GODOT_ANDROID_KEYSTORE_DEBUG_PASSWORD=android" >> "$GITHUB_ENV"
-
-          echo "Android SDK: $SDK_PATH"
+          echo "Android SDK: $SDK"
           echo "Java: $JAVA_HOME"
           godot --version
 
-      - name: Verify project and export preset
+      - name: Validate and repair Android preset
         shell: bash
         run: |
           set -euo pipefail
+
+          FILE="neon-dash-runner/export_presets.cfg"
 
           test -f neon-dash-runner/project.godot
-          test -f neon-dash-runner/export_presets.cfg
+          test -f "$FILE"
 
-          grep -Fq 'name="Android Debug"' \
-            neon-dash-runner/export_presets.cfg
+          grep -Fq 'name="Android Debug"' "$FILE"
+          grep -Fq 'platform="Android"' "$FILE"
 
-          echo "Project and Android Debug preset found."
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
 
-      - name: Import project
+          path = Path("neon-dash-runner/export_presets.cfg")
+          text = path.read_text()
+
+          keystore = str(Path.home() / ".android/debug.keystore")
+          updates = {
+              'keystore/debug': keystore,
+              'keystore/debug_user': 'androiddebugkey',
+              'keystore/debug_password': 'android',
+          }
+
+          for key, value in updates.items():
+              prefix = key + "="
+              lines = text.splitlines()
+              found = False
+
+              for i, line in enumerate(lines):
+                  if line.strip().startswith(prefix):
+                      lines[i] = f'{key}="{value}"'
+                      found = True
+                      break
+
+              if not found:
+                  raise SystemExit(f"Missing preset option: {key}")
+
+              text = "\n".join(lines) + "\n"
+
+          path.write_text(text)
+          print("Android preset keystore settings updated.")
+          PY
+
+          grep -E '^name=|^platform=|^keystore/debug' "$FILE"
+          test -s "$HOME/.android/debug.keystore"
+
+      - name: Import Godot project
         shell: bash
         run: |
           set -euo pipefail
 
-          godot --headless --editor --verbose \
+          godot --headless --editor \
             --path neon-dash-runner --quit
 
-      - name: Export debug APK
+      - name: Export Android Debug APK
         shell: bash
         run: |
-          set -euo pipefail
+          set -uo pipefail
 
           mkdir -p "$GITHUB_WORKSPACE/build"
+
+          echo "Starting Android export..."
+          set +e
 
           godot --headless --verbose \
             --path neon-dash-runner \
@@ -130,9 +181,19 @@ jobs:
             "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" \
             2>&1 | tee "$GITHUB_WORKSPACE/build/export.log"
 
-          test -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
+          RESULT=${PIPESTATUS[0]}
+          set -e
+
+          if [ "$RESULT" -ne 0 ] || \
+             [ ! -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" ]; then
+            echo "Export failed. See export.log in the artifact."
+            exit 1
+          fi
+
+          echo "APK export successful."
 
       - name: Generate checksum
+        if: success()
         shell: bash
         run: |
           set -euo pipefail
