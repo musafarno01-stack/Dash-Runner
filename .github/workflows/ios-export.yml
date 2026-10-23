@@ -28,15 +28,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ ! -f "$PROJECT_DIR/project.godot" ]]; then
-            echo "::error::Missing neon-dash-runner/project.godot"
+          test -f "$PROJECT_DIR/project.godot" || {
+            echo "::error::Godot project not found"
             exit 1
-          fi
+          }
 
-          if [[ ! -f "$PROJECT_DIR/export_presets.cfg" ]]; then
-            echo "::error::Missing export_presets.cfg"
+          test -f "$PROJECT_DIR/export_presets.cfg" || {
+            echo "::error::export_presets.cfg not found"
             exit 1
-          fi
+          }
 
           echo "Godot project found."
 
@@ -45,8 +45,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          VERSION="$GODOT_VERSION"
-          URL="https://github.com/godotengine/godot/releases/download/${VERSION}-stable/Godot_v${VERSION}-stable_macos.universal.zip"
+          URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
 
           curl -fL --retry 3 "$URL" \
             -o "$RUNNER_TEMP/godot.zip"
@@ -59,7 +58,7 @@ jobs:
             -type f -name Godot -perm -111 -print -quit)"
 
           if [[ -z "$GODOT_BIN" ]]; then
-            echo "::error::Godot executable not found."
+            echo "::error::Godot executable not found"
             exit 1
           fi
 
@@ -73,8 +72,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          VERSION="$GODOT_VERSION"
-          URL="https://github.com/godotengine/godot/releases/download/${VERSION}-stable/Godot_v${VERSION}-stable_export_templates.tpz"
+          URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
 
           curl -fL --retry 3 "$URL" \
             -o "$RUNNER_TEMP/templates.tpz"
@@ -91,21 +89,70 @@ jobs:
           fi
 
           if [[ -z "$SOURCE" || ! -d "$SOURCE" ]]; then
-            echo "::error::Export templates not found."
+            echo "::error::Export templates not found"
             exit 1
           fi
 
-          DEST="$HOME/Library/Application Support/Godot/export_templates/${VERSION}.stable"
+          DEST="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
 
           mkdir -p "$DEST"
           cp -R "$SOURCE/." "$DEST/"
 
           if [[ ! -s "$DEST/ios.zip" ]]; then
-            echo "::error::iOS export template is missing."
+            echo "::error::iOS export template missing"
             exit 1
           fi
 
-          echo "iOS export templates installed."
+          echo "iOS templates installed."
+
+      - name: Configure iOS export preset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - "$PROJECT_DIR/export_presets.cfg" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+          text = path.read_text()
+
+          section = "[preset.1.options]"
+          if section not in text:
+              raise SystemExit(
+                  "iOS options section [preset.1.options] not found"
+              )
+
+          before, rest = text.split(section, 1)
+          lines = rest.splitlines()
+
+          values = {
+              "application/app_store_team_id": "AAAAAAAAAA",
+              "application/identifier":
+                  "com.musafarno01.neondashrunner",
+          }
+
+          found = set()
+
+          for i, line in enumerate(lines):
+              stripped = line.strip()
+
+              for key, value in values.items():
+                  if stripped.startswith(key + "="):
+                      lines[i] = f'{key}="{value}"'
+                      found.add(key)
+
+          for key, value in values.items():
+              if key not in found:
+                  lines.insert(0, f'{key}="{value}"')
+
+          path.write_text(
+              before + section + "\n" + "\n".join(lines) + "\n"
+          )
+
+          print("Updated iOS bundle identifier.")
+          print("Set placeholder Team ID for unsigned export attempt.")
+          PY
 
       - name: Import project resources
         shell: bash
@@ -131,10 +178,10 @@ jobs:
 
           ZIP="$OUTPUT/NeonDashRunner.zip"
 
-          if [[ ! -s "$ZIP" ]]; then
-            echo "::error::Godot did not export the iOS project."
+          test -s "$ZIP" || {
+            echo "::error::Godot iOS export failed"
             exit 1
-          fi
+          }
 
           EXTRACT="$OUTPUT/extracted"
           mkdir -p "$EXTRACT"
@@ -144,13 +191,13 @@ jobs:
             -type d -name '*.xcodeproj' -print -quit)"
 
           if [[ -z "$XCODE_PROJECT" ]]; then
-            echo "::error::No Xcode project found in export."
+            echo "::error::No Xcode project found"
             find "$EXTRACT" -maxdepth 5 -print
             exit 1
           fi
 
           echo "XCODE_PROJECT=$XCODE_PROJECT" >> "$GITHUB_ENV"
-          echo "Found: $XCODE_PROJECT"
+          echo "Found Xcode project: $XCODE_PROJECT"
 
       - name: Build unsigned iOS app
         shell: bash
@@ -165,8 +212,8 @@ jobs:
           SCHEME="$(printf '%s' "$SCHEMES" |
             python3 -c '
           import json, sys
-          d = json.load(sys.stdin)
-          schemes = d.get("project", {}).get("schemes", [])
+          data = json.load(sys.stdin)
+          schemes = data.get("project", {}).get("schemes", [])
           if not schemes:
               raise SystemExit("No Xcode scheme found")
           print(schemes[0])
@@ -190,14 +237,14 @@ jobs:
             -maxdepth 2 -type d -name '*.app' -print -quit)"
 
           if [[ -z "$APP_PATH" || ! -d "$APP_PATH" ]]; then
-            echo "::error::Unsigned iOS app was not built."
+            echo "::error::Unsigned iOS app was not built"
             find "$DERIVED/Build/Products" \
               -maxdepth 4 -print || true
             exit 1
           fi
 
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
-          echo "Unsigned app built: $APP_PATH"
+          echo "Unsigned app built."
 
       - name: Package unsigned IPA
         shell: bash
@@ -207,7 +254,8 @@ jobs:
           OUTPUT="$GITHUB_WORKSPACE/build/unsigned-ipa"
           mkdir -p "$OUTPUT/Payload"
 
-          ditto "$APP_PATH" "$OUTPUT/Payload/NeonDashRunner.app"
+          ditto "$APP_PATH" \
+            "$OUTPUT/Payload/NeonDashRunner.app"
 
           (
             cd "$OUTPUT"
@@ -218,12 +266,12 @@ jobs:
 
           IPA="$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
 
-          if [[ ! -s "$IPA" ]]; then
-            echo "::error::IPA package was not created."
+          test -s "$IPA" || {
+            echo "::error::IPA was not created"
             exit 1
-          fi
+          }
 
-          echo "Unsigned IPA package created:"
+          echo "IPA package created:"
           ls -lh "$IPA"
 
       - name: Upload IPA artifact
