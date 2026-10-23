@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   build-android:
-    name: Build and Sign Android APK
+    name: Build Android Debug APK
     runs-on: ubuntu-24.04
     timeout-minutes: 20
 
@@ -40,49 +40,23 @@ jobs:
           test -n "$SDK"
 
           sdkmanager --sdk_root="$SDK" --install \
-            "cmdline-tools;latest" \
             "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.1" \
-            "ndk;23.2.8568313" \
-            "cmake;3.10.2.4988404"
+            "build-tools;35.0.1"
 
           yes | sdkmanager --sdk_root="$SDK" --licenses || true
 
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
 
-      - name: Install Godot 4.4.1 export templates
+      - name: Install Godot 4.4.1 and export templates
         uses: chickensoft-games/setup-godot@v2
         with:
           version: 4.4.1
           use-dotnet: false
           include-templates: true
 
-      - name: Verify Android tools and export templates
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-
-          test -x "$JAVA_HOME/bin/java"
-          test -x "$SDK/platform-tools/adb"
-          test -x "$SDK/build-tools/35.0.1/apksigner"
-          test -d "$SDK/platforms/android-35"
-
-          godot --version
-
-          TEMPLATE_DIR="$HOME/.local/share/godot/export_templates/4.4.1.stable"
-
-          if [ ! -f "$TEMPLATE_DIR/android_debug.apk" ]; then
-            echo "Android debug export template not found:"
-            echo "$TEMPLATE_DIR"
-            find "$HOME" -type f -name 'android_debug.apk' 2>/dev/null || true
-            exit 1
-          fi
-
-      - name: Create debug signing key
+      - name: Create debug keystore
         shell: bash
         run: |
           set -euo pipefail
@@ -99,11 +73,9 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          keytool -list \
-            -keystore "$HOME/.android/debug.keystore" \
-            -storepass android
+          test -s "$HOME/.android/debug.keystore"
 
-      - name: Configure Godot Android SDK
+      - name: Configure Godot Android settings
         shell: bash
         run: |
           set -euo pipefail
@@ -118,9 +90,12 @@ jobs:
           [resource]
           export/android/android_sdk_path = "$SDK"
           export/android/java_sdk_path = "$JAVA_HOME"
+          export/android/debug_keystore = "$HOME/.android/debug.keystore"
+          export/android/debug_keystore_user = "androiddebugkey"
+          export/android/debug_keystore_pass = "android"
           EOF
 
-      - name: Validate project and prepare preset
+      - name: Validate and repair Android preset
         shell: bash
         run: |
           set -euo pipefail
@@ -130,39 +105,62 @@ jobs:
           test -f neon-dash-runner/project.godot
           test -f "$FILE"
 
-          grep -Fq 'name="Android Debug"' "$FILE"
-          grep -Fq 'platform="Android"' "$FILE"
-
           python3 - <<'PY'
           from pathlib import Path
 
           path = Path("neon-dash-runner/export_presets.cfg")
           lines = path.read_text().splitlines()
 
-          replacements = {
-              "package/signed": "false",
+          updates = {
+              "keystore/debug": str(
+                  Path.home() / ".android" / "debug.keystore"
+              ),
+              "keystore/debug_user": "androiddebugkey",
+              "keystore/debug_password": "android",
           }
 
-          for key, value in replacements.items():
-              prefix = key + "="
-              matches = [
-                  i for i, line in enumerate(lines)
-                  if line.strip().startswith(prefix)
-              ]
+          section = None
+          found_preset = False
+          seen = set()
+          output = []
 
-              if len(matches) != 1:
-                  raise SystemExit(
-                      f"Expected exactly one {key} option; "
-                      f"found {len(matches)}"
-                  )
+          for line in lines:
+              stripped = line.strip()
 
-              lines[matches[0]] = f'{key}={value}'
+              if stripped.startswith("[preset.") and stripped.endswith("]"):
+                  section = stripped
+                  if section == "[preset.0]":
+                      found_preset = True
 
-          path.write_text("\n".join(lines) + "\n")
-          print("Godot APK signing disabled; signing will follow separately.")
+              if section == "[preset.0]":
+                  matched = False
+
+                  for key, value in updates.items():
+                      if stripped.startswith(key + "="):
+                          output.append(f'{key}="{value}"')
+                          seen.add(key)
+                          matched = True
+                          break
+
+                  if matched:
+                      continue
+
+              output.append(line)
+
+          if not found_preset:
+              raise SystemExit("Android preset section not found")
+
+          missing = set(updates) - seen
+          if missing:
+              raise SystemExit(
+                  "Preset is missing expected keys: " + ", ".join(sorted(missing))
+              )
+
+          path.write_text("\n".join(output) + "\n")
+          print("Debug keystore settings written to preset.")
           PY
 
-          grep -nE '^name=|^platform=|^package/signed=' "$FILE"
+          grep -nE '^name=|^platform=|^keystore/debug' "$FILE"
 
       - name: Import Godot project
         shell: bash
@@ -172,7 +170,7 @@ jobs:
           godot --headless --editor \
             --path neon-dash-runner --quit
 
-      - name: Export unsigned APK
+      - name: Export signed Debug APK
         shell: bash
         run: |
           set -uo pipefail
@@ -183,39 +181,27 @@ jobs:
           godot --headless --verbose \
             --path neon-dash-runner \
             --export-debug "Android Debug" \
-            "$GITHUB_WORKSPACE/build/NeonDashRunner-unsigned.apk" \
+            "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" \
             2>&1 | tee "$GITHUB_WORKSPACE/build/export.log"
 
           RESULT=${PIPESTATUS[0]}
           set -e
 
           if [ "$RESULT" -ne 0 ] || \
-             [ ! -s "$GITHUB_WORKSPACE/build/NeonDashRunner-unsigned.apk" ]; then
-            echo "Godot export failed; inspect export.log."
+             [ ! -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" ]; then
+            echo "Godot export failed; see export.log."
             exit 1
           fi
 
-      - name: Sign APK with apksigner
+      - name: Verify APK
         shell: bash
         run: |
           set -euo pipefail
 
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
-          APK="$GITHUB_WORKSPACE/build/NeonDashRunner-unsigned.apk"
-          SIGNED="$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
 
-          "$SDK/build-tools/35.0.1/apksigner" sign \
-            --ks "$HOME/.android/debug.keystore" \
-            --ks-key-alias androiddebugkey \
-            --ks-pass pass:android \
-            --key-pass pass:android \
-            --out "$SIGNED" \
-            "$APK"
-
-          "$SDK/build-tools/35.0.1/apksigner" verify --verbose "$SIGNED"
-
-          test -s "$SIGNED"
-          rm "$APK"
+          "$SDK/build-tools/35.0.1/apksigner" verify --verbose \
+            "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
 
       - name: Generate checksum
         if: success()
