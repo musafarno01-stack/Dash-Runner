@@ -23,10 +23,18 @@
   e=m.end()+q.start() if q else len(t)
   o=t[m.end():e]
   r=t[e:]
-  for k,v in {"application/app_store_team_id":"ABCDE12XYZ","application/bundle_identifier":"com.musafarno01.neondashrunner"}.items():
-   z=f'{k}="{v}"'
+  settings={
+   "application/app_store_team_id":"ABCDE12XYZ",
+   "application/bundle_identifier":"com.musafarno01.neondashrunner",
+   "application/export_project_only":"false"
+  }
+  for k,v in settings.items():
+   z=f'{k}="{v}"' if v in ("ABCDE12XYZ","com.musafarno01.neondashrunner") else f'{k}={v}'
    a=re.compile(r'(?m)^'+re.escape(k)+r'\s*=.*$')
    o=a.sub(lambda _:z,o,count=1) if a.search(o) else o.rstrip("\n")+"\n"+z+"\n"
   p.write_text(t[:m.start()]+h+o+r)
-  print("iOS preset configured.")
+  print("iOS preset configured for IPA export.")
   PY
+  mkdir -p "$PROJECT_DIR/build"
+  godot --headless --path "$PROJECT_DIR" --export-release "iOS" "$PROJECT_DIR/build/NeonDashRunner.ipa"
+  test -f "$PROJECT_DIR/build/NeonDashRunner.ipa"
