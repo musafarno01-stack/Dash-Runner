@@ -1,0 +1,75 @@
+
+name: Build iOS Export
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "neon-dash-runner/**"
+      - ".github/workflows/ios-export.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  export-ios:
+    name: Export Neon Dash Runner for iOS
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Godot 4.4.1
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.4.1
+          use-dotnet: false
+          include-templates: true
+
+      - name: Verify project and iOS preset
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -f neon-dash-runner/project.godot
+          test -f neon-dash-runner/export_presets.cfg
+
+          if ! grep -q 'name="iOS"' neon-dash-runner/export_presets.cfg; then
+            echo 'Missing iOS export preset named "iOS".'
+            echo 'Create it in Godot: Project > Export > Add > iOS.'
+            exit 1
+          fi
+
+          godot --version
+
+      - name: Import project resources
+        run: |
+          godot --headless --editor \
+            --path neon-dash-runner --quit
+
+      - name: Export iOS Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$GITHUB_WORKSPACE/build"
+
+          godot --headless \
+            --path neon-dash-runner \
+            --export-debug "iOS" \
+            "$GITHUB_WORKSPACE/build/NeonDashRunner-ios.zip"
+
+          test -s build/NeonDashRunner-ios.zip
+
+      - name: Upload iOS export
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeonDashRunner-iOS-Xcode
+          path: build/NeonDashRunner-ios.zip
+          if-no-files-found: error
+          retention-days: 14
