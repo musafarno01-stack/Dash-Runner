@@ -1,27 +1,32 @@
-- name: Fix iOS export preset
-  shell: bash
-  run: |
-    set -euo pipefail
-    python3 - "$PROJECT_DIR/export_presets.cfg" <<'PY'
-    import re,sys
-    from pathlib import Path
-    p=Path(sys.argv[1]);t=p.read_text()
-    s=list(re.finditer(r'(?m)^\[([^\]]+)\]\s*$',t));n=None
-    for i,x in enumerate(s):
-        if not re.fullmatch(r'preset\.\d+',x.group(1)):continue
-        e=s[i+1].start() if i+1<len(s) else len(t)
-        if re.search(r'(?m)^name\s*=\s*"iOS"\s*$',t[x.end():e]):
-            n=x.group(1).split(".")[1];break
-    if n is None:raise SystemExit("ERROR: iOS preset not found")
-    h=f"[preset.{n}.options]"
-    m=re.search(r'(?m)^\[preset\.'+re.escape(n)+r'\.options\]\s*$',t)
-    if not m:raise SystemExit("ERROR: iOS options section not found")
-    q=re.search(r'(?m)^\[[^\]]+\]\s*$',t[m.end():])
-    e=m.end()+q.start() if q else len(t)
-    o=t[m.end():e];r=t[e:]
-    for k,v in {"application/app_store_team_id":"ABCDE12XYZ","application/bundle_identifier":"com.musafarno01.neondashrunner"}.items():
-        z=f'{k}="{v}"';a=re.compile(r'(?m)^'+re.escape(k)+r'\s*=.*$')
-        o=a.sub(lambda _:z,o,count=1) if a.search(o) else o.rstrip("\n")+"\n"+z+"\n"
-    p.write_text(t[:m.start()]+h+o+r)
-    print("iOS preset configured.")
-    PY
+-name: Fix iOS export preset
+ shell: bash
+ run: |
+  set -euo pipefail
+  python3 - "$PROJECT_DIR/export_presets.cfg" <<'PY'
+  import re,sys
+  from pathlib import Path
+  p=Path(sys.argv[1])
+  t=p.read_text()
+  s=list(re.finditer(r'(?m)^\[([^\]]+)\]\s*$',t))
+  n=None
+  for i,x in enumerate(s):
+   if not re.fullmatch(r'preset\.\d+',x.group(1)):continue
+   e=s[i+1].start() if i+1<len(s) else len(t)
+   if re.search(r'(?m)^name\s*=\s*"iOS"\s*$',t[x.end():e]):
+    n=x.group(1).split(".")[1]
+    break
+  if n is None:raise SystemExit("ERROR: iOS preset not found")
+  h=f"[preset.{n}.options]"
+  m=re.search(r'(?m)^\[preset\.'+re.escape(n)+r'\.options\]\s*$',t)
+  if not m:raise SystemExit("ERROR: iOS options section not found")
+  q=re.search(r'(?m)^\[[^\]]+\]\s*$',t[m.end():])
+  e=m.end()+q.start() if q else len(t)
+  o=t[m.end():e]
+  r=t[e:]
+  for k,v in {"application/app_store_team_id":"ABCDE12XYZ","application/bundle_identifier":"com.musafarno01.neondashrunner"}.items():
+   z=f'{k}="{v}"'
+   a=re.compile(r'(?m)^'+re.escape(k)+r'\s*=.*$')
+   o=a.sub(lambda _:z,o,count=1) if a.search(o) else o.rstrip("\n")+"\n"+z+"\n"
+  p.write_text(t[:m.start()]+h+o+r)
+  print("iOS preset configured.")
+  PY
