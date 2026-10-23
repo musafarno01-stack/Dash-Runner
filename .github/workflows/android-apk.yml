@@ -4,7 +4,9 @@ name: Build Android APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, master]
+    branches:
+      - main
+      - master
     paths:
       - "neon-dash-runner/**"
       - ".github/workflows/android-apk.yml"
@@ -35,6 +37,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
           test -n "$SDK"
 
@@ -55,10 +58,33 @@ jobs:
           use-dotnet: false
           include-templates: true
 
+      - name: Verify tools and export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+
+          test -x "$JAVA_HOME/bin/java"
+          test -x "$SDK/platform-tools/adb"
+          test -x "$SDK/build-tools/35.0.1/apksigner"
+          test -d "$SDK/platforms/android-35"
+
+          godot --version
+
+          TEMPLATE="$HOME/.local/share/godot/export_templates/4.4.1.stable/android_debug.apk"
+
+          if [ ! -f "$TEMPLATE" ]; then
+            echo "Expected Android debug export template not found."
+            find "$HOME" -type f -name android_debug.apk 2>/dev/null || true
+            exit 1
+          fi
+
       - name: Create debug keystore
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p "$HOME/.android"
 
           keytool -genkeypair -noprompt \
@@ -71,17 +97,20 @@ jobs:
             -validity 10000 \
             -dname "CN=Android Debug,O=Android,C=US"
 
-          test -s "$HOME/.android/debug.keystore"
+          keytool -list \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android
 
       - name: Configure Godot Android settings
         shell: bash
         run: |
           set -euo pipefail
+
           SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          SETTINGS="$HOME/.config/godot"
+          mkdir -p "$SETTINGS"
 
-          mkdir -p "$HOME/.config/godot"
-
-          cat > "$HOME/.config/godot/editor_settings-4.4.tres" <<EOF
+          cat > "$SETTINGS/editor_settings-4.4.tres" <<EOF
           [gd_resource type="EditorSettings" format=3]
 
           [resource]
@@ -100,54 +129,90 @@ jobs:
           FILE="neon-dash-runner/export_presets.cfg"
           KEYSTORE="$HOME/.android/debug.keystore"
 
-          test -f neon-dash-runner/project.godot
+          test -f "neon-dash-runner/project.godot"
           test -f "$FILE"
           test -s "$KEYSTORE"
 
           python3 - "$FILE" "$KEYSTORE" <<'PY'
+          import re
           import sys
           from pathlib import Path
 
           path = Path(sys.argv[1])
           keystore = sys.argv[2]
-          lines = path.read_text().splitlines()
+          lines = path.read_text(encoding="utf-8").splitlines()
 
-          # Find the Android Debug preset by its name.
-          preset_index = None
-          section = None
+          # Find the actual Android preset by its platform.
+          sections = {}
+          current = None
 
           for i, line in enumerate(lines):
               s = line.strip()
-
               if s.startswith("[") and s.endswith("]"):
-                  section = s
+                  current = s
+                  sections.setdefault(current, [])
+              elif current is not None:
+                  sections[current].append((i, s))
 
-              if section == "[preset.0]" and s == 'name="Android Debug"':
-                  preset_index = 0
-                  break
+          android_presets = []
 
-          if preset_index is None:
+          for section, entries in sections.items():
+              match = re.fullmatch(r"\[preset\.(\d+)\]", section)
+              if not match:
+                  continue
+
+              values = dict(
+                  item.split("=", 1)
+                  for _, item in entries
+                  if "=" in item
+              )
+
+              if values.get("platform", "").strip('"') == "Android":
+                  android_presets.append(
+                      (int(match.group(1)), section, values)
+                  )
+
+          if not android_presets:
               raise SystemExit(
-                  'Android Debug preset [preset.0] not found.'
+                  "No Android preset exists in export_presets.cfg."
               )
 
-          options_section = "[preset.0.options]"
-          try:
-              start = next(
-                  i for i, line in enumerate(lines)
-                  if line.strip() == options_section
-              )
-          except StopIteration:
+          chosen = next(
+              (
+                  item for item in android_presets
+                  if item[2].get("name", "").strip('"')
+                  == "Android Debug"
+              ),
+              None,
+          )
+
+          if chosen is None:
               raise SystemExit(
-                  "Missing [preset.0.options] section."
+                  'No Android preset named "Android Debug" was found. '
+                  "Check the preset name in Godot."
               )
 
-          end = len(lines)
-          for i in range(start + 1, len(lines)):
-              s = lines[i].strip()
-              if s.startswith("[") and s.endswith("]"):
-                  end = i
-                  break
+          index, preset_section, values = chosen
+          options_section = f"[preset.{index}.options]"
+
+          if options_section not in sections:
+              raise SystemExit(
+                  f"Missing {options_section} in export_presets.cfg."
+              )
+
+          start = next(
+              i for i, line in enumerate(lines)
+              if line.strip() == options_section
+          )
+
+          end = next(
+              (
+                  i for i in range(start + 1, len(lines))
+                  if lines[i].strip().startswith("[")
+                  and lines[i].strip().endswith("]")
+              ),
+              len(lines),
+          )
 
           updates = {
               "keystore/debug": keystore,
@@ -155,16 +220,17 @@ jobs:
               "keystore/debug_password": "android",
           }
 
-          seen = set()
           output = lines[:start + 1]
+          seen = set()
 
           for line in lines[start + 1:end]:
               stripped = line.strip()
               key = stripped.split("=", 1)[0] if "=" in stripped else ""
 
               if key in updates:
-                  output.append(f'{key}="{updates[key]}"')
-                  seen.add(key)
+                  if key not in seen:
+                      output.append(f'{key}="{updates[key]}"')
+                      seen.add(key)
               else:
                   output.append(line)
 
@@ -173,26 +239,60 @@ jobs:
                   output.append(f'{key}="{value}"')
 
           output.extend(lines[end:])
-          path.write_text("\n".join(output) + "\n")
+          path.write_text(
+              "\n".join(output) + "\n",
+              encoding="utf-8",
+          )
 
-          print("Android preset keystore settings repaired.")
+          # Verify the exact section that was updated.
+          saved = path.read_text(encoding="utf-8").splitlines()
+          start = next(
+              i for i, line in enumerate(saved)
+              if line.strip() == options_section
+          )
+          end = next(
+              (
+                  i for i in range(start + 1, len(saved))
+                  if saved[i].strip().startswith("[")
+                  and saved[i].strip().endswith("]")
+              ),
+              len(saved),
+          )
+
+          actual = {}
+          for line in saved[start + 1:end]:
+              stripped = line.strip()
+              if "=" in stripped:
+                  key, value = stripped.split("=", 1)
+                  actual[key] = value.strip().strip('"')
+
           for key, value in updates.items():
-              print(f'{key}="{value}"')
+              if actual.get(key) != value:
+                  raise SystemExit(
+                      f"Preset verification failed for {key}."
+                  )
+
+          print(f"Verified preset: {preset_section}")
+          print(f"Verified options: {options_section}")
+          print("All three debug keystore settings are configured.")
           PY
 
-          grep -nE '^keystore/debug' "$FILE"
+          grep -nE '^name=|^platform=|^keystore/debug' "$FILE"
 
       - name: Import Godot project
         shell: bash
         run: |
           set -euo pipefail
-          godot --headless --editor \
-            --path neon-dash-runner --quit
 
-      - name: Export signed Debug APK
+          godot --headless --editor \
+            --path neon-dash-runner \
+            --quit
+
+      - name: Export Android Debug APK
         shell: bash
         run: |
           set -uo pipefail
+
           mkdir -p "$GITHUB_WORKSPACE/build"
 
           set +e
@@ -207,24 +307,29 @@ jobs:
 
           if [ "$RESULT" -ne 0 ] || \
              [ ! -s "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk" ]; then
-            echo "Godot export failed; see export.log."
+            echo "Godot Android export failed."
             exit 1
           fi
+
+          echo "APK export completed."
 
       - name: Verify APK signature
         shell: bash
         run: |
           set -euo pipefail
-          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
-          "$SDK/build-tools/35.0.1/apksigner" verify --verbose \
-            "$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          APK="$GITHUB_WORKSPACE/build/NeonDashRunner-debug.apk"
+
+          "$SDK/build-tools/35.0.1/apksigner" verify --verbose "$APK"
+          test -s "$APK"
 
       - name: Generate checksum
         if: success()
         shell: bash
         run: |
           set -euo pipefail
+
           cd "$GITHUB_WORKSPACE/build"
           sha256sum NeonDashRunner-debug.apk > SHA256SUMS.txt
 
