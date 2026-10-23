@@ -1,64 +1,89 @@
+
 name: Build Android APK
 
-on: workflow_dispatch: push: branches: - main - master paths: - "neon-dash-runner/**" - ".github/workflows/android-apk.yml"
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "neon-dash-runner/**"
+      - ".github/workflows/android-apk.yml"
 
-permissions: contents: read
+permissions:
+  contents: read
 
-jobs: build-android: name: Export Android Debug APK runs-on: ubuntu-latest
+jobs:
+  build-android:
+    name: Export Android Debug APK
+    runs-on: ubuntu-latest
 
-steps:
-  - name: Checkout repository
-    uses: actions/checkout@v4
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-  - name: Install Java
-    uses: actions/setup-java@v4
-    with:
-      distribution: temurin
-      java-version: "17"
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
 
-  - name: Install Android SDK
-    uses: android-actions/setup-android@v3
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
 
-  - name: Install Godot 4.4.1 and export templates
-    uses: chickensoft-games/setup-godot@v1
-    with:
-      version: 4.4.1
-      use-dotnet: false
-      include-templates: true
+      - name: Install Android SDK components
+        run: |
+          sdkmanager --install \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
 
-  - name: Configure Android SDK environment
-    shell: bash
-    run: |
-      echo "ANDROID_HOME=${ANDROID_HOME:-$ANDROID_SDK_ROOT}" >> "$GITHUB_ENV"
-      echo "ANDROID_SDK_ROOT=${ANDROID_SDK_ROOT:-$ANDROID_HOME}" >> "$GITHUB_ENV"
+      - name: Install Godot and export templates
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: 4.4.1
+          use-dotnet: false
+          include-templates: true
 
-  - name: Verify project files
-    shell: bash
-    run: |
-      test -f neon-dash-runner/project.godot
-      test -f neon-dash-runner/export_presets.cfg
-      echo "Godot project and export presets found."
+      - name: Verify project configuration
+        run: |
+          test -f neon-dash-runner/project.godot
+          test -f neon-dash-runner/main.tscn
+          test -f neon-dash-runner/main.gd
 
-  - name: Import project resources
-    run: godot --headless --editor --path neon-dash-runner --quit
+          if [ ! -f neon-dash-runner/export_presets.cfg ]; then
+            echo "::error::Missing neon-dash-runner/export_presets.cfg. Create an Android export preset named Android Debug in Godot."
+            exit 1
+          fi
 
-  - name: Export Android debug APK
-    run: |
-      mkdir -p build
-      godot --headless --path neon-dash-runner \
-        --export-debug "Android Debug" \
-        build/NeonDashRunner-debug.apk
-      test -s build/NeonDashRunner-debug.apk
+      - name: Import Godot project
+        run: |
+          godot --headless --editor \
+            --path neon-dash-runner --quit
 
-  - name: Generate SHA-256 checksum
-    run: sha256sum build/NeonDashRunner-debug.apk > build/SHA256SUMS.txt
+      - name: Export debug APK
+        run: |
+          mkdir -p build
 
-  - name: Upload APK artifact
-    uses: actions/upload-artifact@v4
-    with:
-      name: NeonDashRunner-Android-Debug
-      path: |
-        build/NeonDashRunner-debug.apk
-        build/SHA256SUMS.txt
-      if-no-files-found: error
-      retention-days: 14
+          godot --headless \
+            --path neon-dash-runner \
+            --export-debug "Android Debug" \
+            ../build/NeonDashRunner-debug.apk
+
+          test -s build/NeonDashRunner-debug.apk
+
+      - name: Generate checksum
+        run: |
+          sha256sum build/NeonDashRunner-debug.apk \
+            > build/SHA256SUMS.txt
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeonDashRunner-Android-Debug
+          path: |
+            build/NeonDashRunner-debug.apk
+            build/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
