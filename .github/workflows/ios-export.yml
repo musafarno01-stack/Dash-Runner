@@ -1,18 +1,13 @@
-
-      - name: Fix iOS export preset
-        shell: bash
-        run: |
+- name:Fix iOS export preset shell: bash run: |
           set -euo pipefail
           python3 - "$PROJECT_DIR/export_presets.cfg" <<'PY'
           import re
           import sys
           from pathlib import Path
-
           path = Path(sys.argv[1])
           text = path.read_text()
           sections = list(re.finditer(r'(?m)^\[([^\]]+)\]\s*$', text))
           preset = None
-
           for i, section in enumerate(sections):
               name = section.group(1)
               if not re.fullmatch(r'preset\.\d+', name):
@@ -22,25 +17,20 @@
               if re.search(r'(?m)^name\s*=\s*"iOS"\s*$', body):
                   preset = name.split(".")[1]
                   break
-
           if preset is None:
               raise SystemExit("ERROR: iOS preset not found")
-
           header = f"[preset.{preset}.options]"
           match = re.search(r'(?m)^\[preset\.' + re.escape(preset) + r'\.options\]\s*$', text)
           if not match:
               raise SystemExit("ERROR: iOS options section not found")
-
           next_section = re.search(r'(?m)^\[[^\]]+\]\s*$', text[match.end():])
           end = match.end() + next_section.start() if next_section else len(text)
           options = text[match.end():end]
           rest = text[end:]
-
           values = {
               "application/app_store_team_id": "ABCDE12XYZ",
               "application/bundle_identifier": "com.musafarno01.neondashrunner",
           }
-
           for key, value in values.items():
               line = f'{key}="{value}"'
               pattern = re.compile(r'(?m)^' + re.escape(key) + r'\s*=.*$')
@@ -48,7 +38,6 @@
                   options = pattern.sub(lambda _: line, options, count=1)
               else:
                   options += "\n" + line
-
           path.write_text(text[:match.start()] + header + options + rest)
           print("iOS preset configured.")
           PY
