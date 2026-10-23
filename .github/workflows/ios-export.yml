@@ -1,3 +1,4 @@
+
 name: Build iOS IPA
 
 on:
@@ -5,12 +6,210 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
+    timeout-minutes: 60
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      # Put your existing Godot setup step here.
+      - name: Install Godot
+        shell: bash
+        run: |
+          set -euo pipefail
 
-      # Put your IPA build steps here.
+          GODOT_VERSION="4.4.1"
+          curl -fL \
+            "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_macos.universal.zip" \
+            -o "$RUNNER_TEMP/godot.zip"
+
+          mkdir -p "$RUNNER_TEMP/godot"
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
+
+          GODOT_BIN="$(find "$RUNNER_TEMP/godot" \
+            -type f -name 'Godot*' -perm -111 -print -quit)"
+
+          if [[ -z "$GODOT_BIN" ]]; then
+            echo "::error::Could not find Godot executable."
+            exit 1
+          fi
+
+          chmod +x "$GODOT_BIN"
+          echo "GODOT_BIN=$GODOT_BIN" >> "$GITHUB_ENV"
+          "$GODOT_BIN" --version
+
+      - name: Install Godot iOS export templates
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          VERSION="$("$GODOT_BIN" --version | cut -d. -f1-2)"
+          TEMPLATE_URL="https://github.com/godotengine/godot/releases/download/4.4.1-stable/Godot_v4.4.1-stable_export_templates.tpz"
+
+          curl -fL "$TEMPLATE_URL" -o "$RUNNER_TEMP/templates.tpz"
+
+          TEMPLATE_DIR="$HOME/Library/Application Support/Godot/export_templates/$("$GODOT_BIN" --version)"
+          mkdir -p "$TEMPLATE_DIR"
+
+          unzip -q "$RUNNER_TEMP/templates.tpz" -d "$RUNNER_TEMP/templates"
+
+          TEMPLATE_SOURCE="$(find "$RUNNER_TEMP/templates" \
+            -type d -name 'templates' -print -quit)"
+
+          if [[ -z "$TEMPLATE_SOURCE" ]]; then
+            echo "::error::Export templates archive has an unexpected structure."
+            exit 1
+          fi
+
+          cp -R "$TEMPLATE_SOURCE/." "$TEMPLATE_DIR/"
+
+      - name: Export iOS project
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR="$GITHUB_WORKSPACE/neon-dash-runner"
+          OUTPUT_DIR="$GITHUB_WORKSPACE/build/ios"
+
+          test -f "$PROJECT_DIR/project.godot" || {
+            echo "::error::neon-dash-runner/project.godot not found."
+            exit 1
+          }
+
+          test -f "$PROJECT_DIR/export_presets.cfg" || {
+            echo "::error::export_presets.cfg not found."
+            exit 1
+          }
+
+          mkdir -p "$OUTPUT_DIR"
+
+          "$GODOT_BIN" --headless --verbose \
+            --path "$PROJECT_DIR" \
+            --export-debug "iOS" \
+            "$OUTPUT_DIR/NeonDashRunner.zip"
+
+          test -s "$OUTPUT_DIR/NeonDashRunner.zip" || {
+            echo "::error::Godot did not generate the export ZIP."
+            exit 1
+          }
+
+          mkdir -p "$OUTPUT_DIR/extracted"
+          unzip -q "$OUTPUT_DIR/NeonDashRunner.zip" \
+            -d "$OUTPUT_DIR/extracted"
+
+          PROJECT="$(find "$OUTPUT_DIR/extracted" \
+            -type d -name '*.xcodeproj' -print -quit)"
+
+          if [[ -z "$PROJECT" ]]; then
+            echo "::error::No Xcode project found in the export."
+            find "$OUTPUT_DIR/extracted" -maxdepth 4 -print
+            exit 1
+          fi
+
+          echo "XCODE_PROJECT=$PROJECT" >> "$GITHUB_ENV"
+
+      - name: Check Apple signing configuration
+        shell: bash
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE_UUID: ${{ secrets.APPLE_PROVISIONING_PROFILE_UUID }}
+        run: |
+          set -euo pipefail
+
+          if [[ -z "$TEAM_ID" || -z "$PROFILE_UUID" ]]; then
+            echo "::error::Set APPLE_TEAM_ID and APPLE_PROVISIONING_PROFILE_UUID."
+            exit 1
+          fi
+
+          security find-identity -v -p codesigning
+
+          if ! security find-identity -v -p codesigning |
+            grep -q 'Apple Distribution'; then
+            echo "::error::Apple Distribution certificate is not installed."
+            echo "Install your certificate and private key before archiving."
+            exit 1
+          fi
+
+          if [[ ! -f "$HOME/Library/MobileDevice/Provisioning Profiles/$PROFILE_UUID.mobileprovision" ]]; then
+            echo "::error::Provisioning profile is not installed."
+            echo "Install it before archiving."
+            exit 1
+          fi
+
+      - name: Archive and export IPA
+        shell: bash
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          PROFILE_UUID: ${{ secrets.APPLE_PROVISIONING_PROFILE_UUID }}
+        run: |
+          set -euo pipefail
+
+          BUNDLE_ID="com.musafarno01.neondashrunner"
+          ARCHIVE="$GITHUB_WORKSPACE/build/NeonDashRunner.xcarchive"
+          EXPORT_DIR="$GITHUB_WORKSPACE/build/ipa"
+
+          mkdir -p "$EXPORT_DIR"
+
+          SCHEME="$(xcodebuild -list -json -project "$XCODE_PROJECT" |
+            python3 -c '
+          import json,sys
+          d=json.load(sys.stdin)
+          schemes=d["project"].get("schemes",[])
+          if not schemes:
+              raise SystemExit("No Xcode scheme found.")
+          print(schemes[0])
+          ')"
+
+          xcodebuild \
+            -project "$XCODE_PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$ARCHIVE" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROFILE_UUID" \
+            archive
+
+          cat > "$RUNNER_TEMP/ExportOptions.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>ad-hoc</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>$TEAM_ID</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>$BUNDLE_ID</key>
+              <string>$PROFILE_UUID</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportPath "$EXPORT_DIR" \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
+
+          IPA="$(find "$EXPORT_DIR" -maxdepth 1 -type f -name '*.ipa' -print -quit)"
+
+          if [[ -z "$IPA" ]]; then
+            echo "::error::Xcode did not generate an IPA."
+            exit 1
+          fi
+
+          cp "$IPA" "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
+          ls -lh "$GITHUB_WORKSPACE/build/NeonDashRunner.ipa"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NeonDashRunner-IPA
+          path: build/NeonDashRunner.ipa
+          if-no-files-found: error
+          retention-days: 14
