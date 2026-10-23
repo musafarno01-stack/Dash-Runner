@@ -89,7 +89,7 @@ jobs:
       - name: Import Godot project
         shell: bash
         run: |
-          godot --headless --editor --quit
+          godot --headless --editor --path neon-dash-runner --quit
 
       - name: Export Android Debug APK
         shell: bash
@@ -100,7 +100,7 @@ jobs:
           LOG="$GITHUB_WORKSPACE/build/export.log"
 
           set +e
-          godot --headless --verbose --export-debug "Android Debug" "$APK" 2>&1 | tee "$LOG"
+          godot --headless --verbose --path neon-dash-runner --export-debug "Android Debug" "$APK" 2>&1 | tee "$LOG"
           RESULT=${PIPESTATUS[0]}
           set -e
 
